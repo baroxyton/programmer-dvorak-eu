@@ -1,188 +1,151 @@
 #!/usr/bin/env python3
-
-# Vibe coded btw
-
 """
 Automates installation and uninstallation of the "Dvorak for Programmers with European Keys" keyboard layout on Ubuntu.
 
 Features:
 - install: appends layout to /usr/share/X11/xkb/symbols/us and updates evdev.xml
-         with comments marking begin/end for easy uninstall.
-- uninstall: removes appended sections and restores backups.
+           wrapped in markers so only inserted once and easily removed.
+- uninstall: removes injected sections and restores backups.
 - backups: creates timestamped backups before install/uninstall.
-- list-backups: shows available backup files.
-- show-backup-location: prints backup directory.
-
-Usage:
-  sudo python3 install_dpe_keyboard.py install
-  sudo python3 install_dpe_keyboard.py uninstall
-  python3 install_dpe_keyboard.py list-backups
-  python3 install_dpe_keyboard.py show-backup-location
-
-Ensure `us-dpe` (layout definition) is in the same folder as this script.
+- list-backups: show available backups.
+- show-backup: display path to a specific backup.
 """
+
+# Vibe coded btw
+
 import os
 import sys
 import shutil
 import argparse
 import datetime
-import xml.etree.ElementTree as ET
 
-# File paths
+# Paths
 SYMBOLS_FILE = '/usr/share/X11/xkb/symbols/us'
 RULES_FILE = '/usr/share/X11/xkb/rules/evdev.xml'
 BACKUP_DIR = '/var/backups/dpe_keyboard'
-# Local layout file (must reside alongside this script)
 LAYOUT_FILE = os.path.join(os.path.dirname(__file__), 'us-dpe')
 
-BEGIN_COMMENT_SYM = '// DPE-BEGIN'
-END_COMMENT_SYM = '// DPE-END'
-BEGIN_COMMENT_XML = '<!-- DPE-BEGIN -->'
-END_COMMENT_XML = '<!-- DPE-END -->'
-VARIANT_NAME = 'dpe'
+# Markers
+SYMBOLS_START = '# DPE-START'
+SYMBOLS_END = '# DPE-END'
+VARIANT_START = '<!--DPE-START-->'
+VARIANT_END = '<!--DPE-END-->'
 
 
-def ensure_root():
-    if os.geteuid() != 0:
-        sys.exit('This script must be run as root (use sudo).')
-
-
-def ensure_backup_dir():
+def backup(file_path):
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    fname = f"{os.path.basename(file_path)}.{ts}.bak"
+    dest = os.path.join(BACKUP_DIR, fname)
+    shutil.copy2(file_path, dest)
+    print(f"Backup of {file_path} -> {dest}")
+    return dest
 
 
-def timestamp():
-    return datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+def install_symbols():
+    # read symbols file and ensure not already installed
+    with open(SYMBOLS_FILE) as f:
+        text = f.read()
+    if SYMBOLS_START in text:
+        print("Symbols file already contains DPE layout; skipping.")
+        return
+    backup(SYMBOLS_FILE)
+    content = open(LAYOUT_FILE).read()
+    to_add = f"\n{SYMBOLS_START}\n{content}\n{SYMBOLS_END}\n"
+    with open(SYMBOLS_FILE, 'a') as f:
+        f.write(to_add)
+    print("Added layout to symbols file.")
 
 
-def backup_file(path):
-    ensure_backup_dir()
-    if os.path.exists(path):
-        fname = os.path.basename(path)
-        dest = os.path.join(BACKUP_DIR, f"{fname}.{timestamp()}.bak")
-        shutil.copy2(path, dest)
-        print(f"Backed up {path} to {dest}")
-        return dest
-    else:
-        print(f"Warning: {path} does not exist to backup.")
-        return None
+def uninstall_symbols():
+    with open(SYMBOLS_FILE) as f:
+        text = f.read()
+    if SYMBOLS_START not in text:
+        print("No symbols markers found; nothing to remove.")
+        return
+    backup(SYMBOLS_FILE)
+    before, rest = text.split(SYMBOLS_START, 1)
+    _, after = rest.split(SYMBOLS_END, 1)
+    with open(SYMBOLS_FILE, 'w') as f:
+        f.write(before + after)
+    print("Removed layout from symbols file.")
+
+
+def install_variant():
+    with open(RULES_FILE) as f:
+        text = f.read()
+    if VARIANT_START in text:
+        print("Variant already installed; skipping.")
+        return
+    backup(RULES_FILE)
+    # insert into variantList of us
+    insert = f"{VARIANT_START}<variant>\n  <configItem>\n    <name>dpe</name>\n    <description>English (Programmer Dvorak Eur. Keys)</description>\n  </configItem>\n</variant>{VARIANT_END}"
+    # find </variantList> after us layout
+    marker = '<layout>'
+    idx = text.find('<name>us</name>')
+    if idx == -1:
+        print("Could not find us layout in rules file.")
+        sys.exit(1)
+    # find next </variantList> after idx
+    vl_end = text.find('</variantList>', idx)
+    if vl_end == -1:
+        print("Could not find variantList end.")
+        sys.exit(1)
+    # insert before </variantList>
+    new_text = text[:vl_end] + insert + text[vl_end:]
+    with open(RULES_FILE, 'w') as f:
+        f.write(new_text)
+    print("Added variant to rules file.")
+
+
+def uninstall_variant():
+    with open(RULES_FILE) as f:
+        text = f.read()
+    if VARIANT_START not in text:
+        print("No variant markers found in rules file.")
+        return
+    backup(RULES_FILE)
+    # remove block between markers
+    before, rest = text.split(VARIANT_START, 1)
+    _, after = rest.split(VARIANT_END, 1)
+    with open(RULES_FILE, 'w') as f:
+        f.write(before + after)
+    print("Removed variant from rules file.")
 
 
 def list_backups():
-    ensure_backup_dir()
-    files = sorted(os.listdir(BACKUP_DIR))
-    for f in files:
-        print(f)
+    for fn in sorted(os.listdir(BACKUP_DIR)):
+        print(fn)
 
 
-def show_backup_location():
-    print(BACKUP_DIR)
-
-
-def install():
-    ensure_root()
-    # Backup originals
-    backup_file(SYMBOLS_FILE)
-    backup_file(RULES_FILE)
-
-    # Append layout to symbols file
-    with open(LAYOUT_FILE, 'r', encoding='utf-8') as src:
-        layout_data = src.read()
-
-    with open(SYMBOLS_FILE, 'a', encoding='utf-8') as sym:
-        sym.write(f"\n{BEGIN_COMMENT_SYM}\n")
-        sym.write(layout_data)
-        sym.write(f"\n{END_COMMENT_SYM}\n")
-    print(f"Appended layout to {SYMBOLS_FILE}")
-
-    # Modify evdev.xml
-    tree = ET.parse(RULES_FILE)
-    root = tree.getroot()
-    # Find <layout name="us"> element
-    for layout in root.findall('layout'):
-        name = layout.find('configItem/name')
-        if name is not None and name.text == 'us':
-            variantList = layout.find('variantList')
-            # Insert comments and variant
-            comment1 = ET.Comment(' DPE-BEGIN ')
-            comment2 = ET.Comment(' DPE-END ')
-            variant = ET.Element('variant')
-            ci = ET.SubElement(variant, 'configItem')
-            nm = ET.SubElement(ci, 'name'); nm.text = VARIANT_NAME
-            desc = ET.SubElement(ci, 'description'); desc.text = 'English (Programmer Dvorak Eur. Keys)'
-            variantList.insert(0, comment1)
-            variantList.insert(1, variant)
-            variantList.insert(2, comment2)
-            break
-    tree.write(RULES_FILE, encoding='utf-8', xml_declaration=True)
-    print(f"Updated {RULES_FILE} with variant '{VARIANT_NAME}'")
-
-
-def uninstall():
-    ensure_root()
-    # Backup originals
-    backup_file(SYMBOLS_FILE)
-    backup_file(RULES_FILE)
-
-    # Remove appended layout in symbols file
-    with open(SYMBOLS_FILE, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    out = []
-    skip = False
-    for line in lines:
-        if BEGIN_COMMENT_SYM in line:
-            skip = True
-            continue
-        if END_COMMENT_SYM in line:
-            skip = False
-            continue
-        if not skip:
-            out.append(line)
-    with open(SYMBOLS_FILE, 'w', encoding='utf-8') as f:
-        f.writelines(out)
-    print(f"Removed layout block from {SYMBOLS_FILE}")
-
-    # Remove variant from evdev.xml
-    tree = ET.parse(RULES_FILE)
-    root = tree.getroot()
-    for layout in root.findall('layout'):
-        name = layout.find('configItem/name')
-        if name is not None and name.text == 'us':
-            variantList = layout.find('variantList')
-            to_remove = []
-            for elem in list(variantList):
-                # remove comment blocks and variant
-                if isinstance(elem, ET.Comment) and 'DPE-BEGIN' in elem.text:
-                    # remove until DPE-END
-                    idx = list(variantList).index(elem)
-                    # find matching end comment
-                    for j, e2 in enumerate(list(variantList)[idx+1:], start=idx+1):
-                        if isinstance(e2, ET.Comment) and 'DPE-END' in e2.text:
-                            # remove slice
-                            for rem in list(variantList)[idx:j+1]:
-                                variantList.remove(rem)
-                            break
-                    break
-            break
-    tree.write(RULES_FILE, encoding='utf-8', xml_declaration=True)
-    print(f"Removed variant '{VARIANT_NAME}' from {RULES_FILE}")
+def show_backup(name):
+    path = os.path.join(BACKUP_DIR, name)
+    if os.path.exists(path):
+        print(path)
+    else:
+        print(f"Backup {name} not found.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Install/uninstall DPE keyboard layout')
-    parser.add_argument('action', choices=['install', 'uninstall', 'list-backups', 'show-backup-location'],
-                        help='Action to perform')
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument('action', choices=['install', 'uninstall', 'list-backups', 'show-backup'])
+    p.add_argument('--backup', help='show specific backup file name for show-backup')
+    args = p.parse_args()
 
     if args.action == 'install':
-        install()
+        install_symbols()
+        install_variant()
     elif args.action == 'uninstall':
-        uninstall()
+        uninstall_symbols()
+        uninstall_variant()
     elif args.action == 'list-backups':
         list_backups()
-    elif args.action == 'show-backup-location':
-        show_backup_location()
+    elif args.action == 'show-backup':
+        if not args.backup:
+            print("Please provide --backup filename to show.")
+        else:
+            show_backup(args.backup)
 
 if __name__ == '__main__':
     main()
-```
+
