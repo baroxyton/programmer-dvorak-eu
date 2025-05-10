@@ -1,151 +1,161 @@
 #!/usr/bin/env python3
+
+# Vibe coded btw
 """
 Automates installation and uninstallation of the "Dvorak for Programmers with European Keys" keyboard layout on Ubuntu.
 
 Features:
 - install: appends layout to /usr/share/X11/xkb/symbols/us and updates evdev.xml
-           wrapped in markers so only inserted once and easily removed.
+           wrapped in markers so only installed once and easily removed.
 - uninstall: removes injected sections and restores backups.
 - backups: creates timestamped backups before install/uninstall.
-- list-backups: show available backups.
-- show-backup: display path to a specific backup.
+- list-backups: shows existing backups.
 """
-
-# Vibe coded btw
 
 import os
 import sys
 import shutil
 import argparse
 import datetime
+import re
+import xml.etree.ElementTree as ET
 
-# Paths
+# Constants (edit if your paths differ)
 SYMBOLS_FILE = '/usr/share/X11/xkb/symbols/us'
-RULES_FILE = '/usr/share/X11/xkb/rules/evdev.xml'
-BACKUP_DIR = '/var/backups/dpe_keyboard'
-LAYOUT_FILE = os.path.join(os.path.dirname(__file__), 'us-dpe')
+RULES_FILE   = '/usr/share/X11/xkb/rules/evdev.xml'
+BACKUP_DIR   = '/var/backups/dpe_keyboard'
+LAYOUT_FILE  = os.path.join(os.path.dirname(__file__), 'us-dpe')
 
 # Markers
 SYMBOLS_START = '# DPE-START'
-SYMBOLS_END = '# DPE-END'
-VARIANT_START = '<!--DPE-START-->'
-VARIANT_END = '<!--DPE-END-->'
+SYMBOLS_END   = '# DPE-END'
+XML_START     = 'DPE-START'
+XML_END       = 'DPE-END'
 
 
-def backup(file_path):
+def ensure_backup_dir():
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    ts = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-    fname = f"{os.path.basename(file_path)}.{ts}.bak"
+
+
+def timestamp():
+    return datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+
+
+def backup(path):
+    ensure_backup_dir()
+    fname = os.path.basename(path) + '.' + timestamp() + '.bak'
     dest = os.path.join(BACKUP_DIR, fname)
-    shutil.copy2(file_path, dest)
-    print(f"Backup of {file_path} -> {dest}")
+    shutil.copy2(path, dest)
+    print(f'Backup of {path} → {dest}')
     return dest
 
 
+def list_backups():
+    ensure_backup_dir()
+    for f in sorted(os.listdir(BACKUP_DIR)):
+        print(f)
+
+
 def install_symbols():
-    # read symbols file and ensure not already installed
-    with open(SYMBOLS_FILE) as f:
-        text = f.read()
-    if SYMBOLS_START in text:
-        print("Symbols file already contains DPE layout; skipping.")
+    data = open(SYMBOLS_FILE).read()
+    if SYMBOLS_START in data:
+        print('Symbols file already contains DPE section; skipping.')
         return
     backup(SYMBOLS_FILE)
-    content = open(LAYOUT_FILE).read()
-    to_add = f"\n{SYMBOLS_START}\n{content}\n{SYMBOLS_END}\n"
+
+    layout = open(LAYOUT_FILE).read().rstrip()
+    injected = (
+        "\n" + SYMBOLS_START + "\n"
+        + layout + "\n"
+        + SYMBOLS_END + "\n"
+    )
     with open(SYMBOLS_FILE, 'a') as f:
-        f.write(to_add)
-    print("Added layout to symbols file.")
+        f.write(injected)
+    print('Injected layout into symbols file.')
 
 
 def uninstall_symbols():
-    with open(SYMBOLS_FILE) as f:
-        text = f.read()
+    text = open(SYMBOLS_FILE).read()
     if SYMBOLS_START not in text:
-        print("No symbols markers found; nothing to remove.")
+        print('No DPE markers in symbols file; skipping.')
         return
     backup(SYMBOLS_FILE)
-    before, rest = text.split(SYMBOLS_START, 1)
-    _, after = rest.split(SYMBOLS_END, 1)
+    # remove block between markers inclusive
+    new = re.sub(rf"{re.escape(SYMBOLS_START)}[\s\S]*?{re.escape(SYMBOLS_END)}\n?", '', text)
     with open(SYMBOLS_FILE, 'w') as f:
-        f.write(before + after)
-    print("Removed layout from symbols file.")
+        f.write(new)
+    print('Removed layout from symbols file.')
 
 
 def install_variant():
-    with open(RULES_FILE) as f:
-        text = f.read()
-    if VARIANT_START in text:
-        print("Variant already installed; skipping.")
+    text = open(RULES_FILE).read()
+    if f'<!--{XML_START}-->' in text:
+        print('Variant already installed; skipping.')
         return
     backup(RULES_FILE)
-    # insert into variantList of us
-    insert = f"{VARIANT_START}<variant>\n  <configItem>\n    <name>dpe</name>\n    <description>English (Programmer Dvorak Eur. Keys)</description>\n  </configItem>\n</variant>{VARIANT_END}"
-    # find </variantList> after us layout
-    marker = '<layout>'
-    idx = text.find('<name>us</name>')
-    if idx == -1:
-        print("Could not find us layout in rules file.")
+
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    tree = ET.parse(RULES_FILE, parser=parser)
+    root = tree.getroot()
+
+    us_layout = None
+    for layout in root.findall('.//layout'):
+        ci = layout.find('configItem')
+        if ci is not None and (ci.find('name') is not None and ci.find('name').text == 'us'):
+            # ensure shortDescription=en and countryList contains US
+            sd = ci.find('shortDescription')
+            if sd is not None and sd.text == 'en':
+                us_layout = layout
+                break
+    if us_layout is None:
+        print('Could not find US layout in rules file.')
         sys.exit(1)
-    # find next </variantList> after idx
-    vl_end = text.find('</variantList>', idx)
-    if vl_end == -1:
-        print("Could not find variantList end.")
+
+    vlist = us_layout.find('variantList')
+    if vlist is None:
+        print('No <variantList> under US layout; cannot install.')
         sys.exit(1)
-    # insert before </variantList>
-    new_text = text[:vl_end] + insert + text[vl_end:]
-    with open(RULES_FILE, 'w') as f:
-        f.write(new_text)
-    print("Added variant to rules file.")
+
+    variant = ET.Element('variant')
+    ci = ET.SubElement(variant, 'configItem')
+    nm = ET.SubElement(ci, 'name'); nm.text = 'dpe'
+    desc = ET.SubElement(ci, 'description')
+    desc.text = 'English (Programmer Dvorak Eur. Keys)'
+
+    vlist.append(ET.Comment(XML_START))
+    vlist.append(variant)
+    vlist.append(ET.Comment(XML_END))
+
+    tree.write(RULES_FILE, encoding='utf-8', xml_declaration=True)
+    print('Injected variant into evdev.xml.')
 
 
 def uninstall_variant():
-    with open(RULES_FILE) as f:
-        text = f.read()
-    if VARIANT_START not in text:
-        print("No variant markers found in rules file.")
+    text = open(RULES_FILE).read()
+    if f'<!--{XML_START}-->' not in text:
+        print('No variant markers found in rules file.')
         return
     backup(RULES_FILE)
-    # remove block between markers
-    before, rest = text.split(VARIANT_START, 1)
-    _, after = rest.split(VARIANT_END, 1)
+    # remove XML comment block inclusive
+    new = re.sub(rf"<!--{XML_START}-->[\s\S]*?<!--{XML_END}-->", '', text)
     with open(RULES_FILE, 'w') as f:
-        f.write(before + after)
-    print("Removed variant from rules file.")
-
-
-def list_backups():
-    for fn in sorted(os.listdir(BACKUP_DIR)):
-        print(fn)
-
-
-def show_backup(name):
-    path = os.path.join(BACKUP_DIR, name)
-    if os.path.exists(path):
-        print(path)
-    else:
-        print(f"Backup {name} not found.")
+        f.write(new)
+    print('Removed variant from evdev.xml.')
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('action', choices=['install', 'uninstall', 'list-backups', 'show-backup'])
-    p.add_argument('--backup', help='show specific backup file name for show-backup')
-    args = p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('cmd', choices=['install','uninstall','list-backups'])
+    args = parser.parse_args()
 
-    if args.action == 'install':
+    if args.cmd == 'list-backups':
+        list_backups()
+    elif args.cmd == 'install':
         install_symbols()
         install_variant()
-    elif args.action == 'uninstall':
+    elif args.cmd == 'uninstall':
         uninstall_symbols()
         uninstall_variant()
-    elif args.action == 'list-backups':
-        list_backups()
-    elif args.action == 'show-backup':
-        if not args.backup:
-            print("Please provide --backup filename to show.")
-        else:
-            show_backup(args.backup)
 
 if __name__ == '__main__':
     main()
-
